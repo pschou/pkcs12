@@ -37,7 +37,7 @@ var (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "pkcs12-tool, Version", version, "(https://github.com/pschou/pkcs12-tool)")
+		fmt.Fprintln(os.Stderr, "pkcs12, Version", version, "(https://github.com/pschou/pkcs12)")
 		_, exec := path.Split(os.Args[0])
 		fmt.Fprint(os.Stderr, "Usage:\n  "+exec+" [flags] in_file.p12 [out_file.p12 out_file.jks ...]\n  "+
 			exec+" [flags] in_file.jks [out_file.jks out_file.p12...]\n"+
