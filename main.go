@@ -5,11 +5,11 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,32 +20,45 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unsafe"
 
-	"github.com/pavel-v-chernykh/keystore-go/v4"
+	jks "github.com/lwithers/minijks/jks"
+	pkcs12 "github.com/pschou/go-pkcs12"
 	"golang.org/x/term"
-	"software.sslmate.com/src/go-pkcs12"
 )
 
 var (
-	passwordIn    = flag.String("pass", "", "Provide password from alternate source\nFor example: file:passfile.txt env:PASSWORD str:'pa55w0rd')")
-	certAlgorithm = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
-	keyAlgorithm  = flag.String("keyAlgorithm", "PBES2", "Key Algorithm")
-	macAlgorithm  = flag.String("macAlgorithm", "SHA256", "Key Algorithm")
-	version       string
+	passwordIn = flag.String("passin", "", "Provide password from alternate source\n"+
+		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"")
+	certAlgorithm      = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
+	keyAlgorithm       = flag.String("keyAlgorithm", "PBES2", "Key Algorithm")
+	macAlgorithm       = flag.String("macAlgorithm", "SHA256", "Key Algorithm")
+	pbes2HmacAlgorithm = flag.String("pbes2-hmac", "SHA256", "Key Algorithm")
+	pbes2EncAlgorithm  = flag.String("pbes2-enc", "AES256CBC", "PBE2 Encryption Algorithm")
+	saltLength         = flag.Int("saltLength", 20, "Define the length of the salt")
+	iterations         = flag.Int("iterations", 10000, "Define the number of iterations")
+	version            string
 )
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "pkcs12, Version", version, "(https://github.com/pschou/pkcs12)")
+		fmt.Fprintln(os.Stderr, "pkcs, Version", version, "(https://github.com/pschou/pkcs)")
 		_, exec := path.Split(os.Args[0])
 		fmt.Fprint(os.Stderr, "Usage:\n  "+exec+" [flags] in_file.p12 [out_file.p12 out_file.jks ...]\n  "+
 			exec+" [flags] in_file.jks [out_file.jks out_file.p12...]\n"+
 			"Note: Input and output can be the same name for an in place conversion.\n"+
 			"Flags:\n")
 		flag.PrintDefaults()
-		fmt.Fprint(os.Stderr, "Hashes available:\n  ", strings.Join(mapToSlice(hashMap), "\n  "), "\n")
-		fmt.Fprint(os.Stderr, "Algorithms available:\n  ", strings.Join(mapToSlice(algoMap), "\n  "), "\n")
+		fmt.Fprint(os.Stderr, "Output formats can be set by a prefix (ie crt:myfile) or suffix (myfile.crt).\n  ",
+			"cert    - only certificates\n  ",
+			"ukey    - unencrypted key\n  ",
+			"p12 pfx - pkcs12 encoded key\n  ",
+			"jks     - java keystore key\n  ",
+			"both:   - prefix to indicate both the private and public key in one file\n",
+		)
+		fmt.Fprint(os.Stderr, "PBE Algorithms Available:\n  ", strings.Join(mapToSlice(pkcs12.PBE_Algorithms_Available), ", "), "\n")
+		fmt.Fprint(os.Stderr, "PBE MACs Available:\n  ", strings.Join(mapToSlice(pkcs12.PBE_MACs_Available), ", "), "\n")
+		fmt.Fprint(os.Stderr, "PBES2 Ciphers Available:\n  ", strings.Join(mapToSlice(pkcs12.PBES2_Ciphers_Available), ", "), "\n")
+		fmt.Fprint(os.Stderr, "PBES2 HMACs Available:\n  ", strings.Join(mapToSlice(pkcs12.PBES2_HMACs_Available), ", "), "\n")
 	}
 	flag.Parse()
 	files := flag.Args()
@@ -57,24 +70,42 @@ func main() {
 		FailF("Must provide an input file and at least one output file")
 	}
 
-	encoder := Encoder{
-		macAlgorithm:         hashMap[*macAlgorithm],
-		certAlgorithm:        algoMap[*certAlgorithm],
-		keyAlgorithm:         algoMap[*keyAlgorithm],
-		macIterations:        2048,
-		encryptionIterations: 2048,
-		saltLen:              16,
-		rand:                 rand.Reader,
+	encoder := &pkcs12.P12{
+		MACAlgorithm:         pkcs12.PBE_MACs_Available[*macAlgorithm],
+		CertBagAlgorithm:     pkcs12.PBE_Algorithms_Available[*certAlgorithm],
+		KeyBagAlgorithm:      pkcs12.PBE_Algorithms_Available[*keyAlgorithm],
+		MACIterations:        uint(*iterations),
+		EncryptionIterations: uint(*iterations),
 	}
-	switch {
-	case encoder.macAlgorithm == nil:
-		FailF("Invalid MAC Algorithm: %q", *macAlgorithm)
-	case encoder.certAlgorithm == nil:
-		FailF("Invalid Cert Algorithm: %q", *macAlgorithm)
-	case encoder.keyAlgorithm == nil:
-		FailF("Invalid Key Algorithm: %q", *macAlgorithm)
+	if v, ok := pkcs12.PBE_MACs_Available[*macAlgorithm]; !ok {
+		FailF("Invalid MAC PBE Algorithm: %q", *macAlgorithm)
+	} else {
+		encoder.MACAlgorithm = v
+	}
+	if v, ok := pkcs12.PBE_Algorithms_Available[*certAlgorithm]; !ok {
+		FailF("Invalid Cert PBE Algorithm: %q", *certAlgorithm)
+	} else {
+		encoder.CertBagAlgorithm = v
+	}
+	if v, ok := pkcs12.PBE_Algorithms_Available[*keyAlgorithm]; !ok {
+		FailF("Invalid Key Algorithm: %q", *keyAlgorithm)
+	} else {
+		encoder.KeyBagAlgorithm = v
+	}
+	if v, ok := pkcs12.PBES2_HMACs_Available[*pbes2HmacAlgorithm]; !ok {
+		FailF("Invalid PBES2 HMAC Algorithm: %q", *pbes2HmacAlgorithm)
+	} else {
+		encoder.PBES2_HMACAlgorithm = v
+	}
+	if v, ok := pkcs12.PBES2_Ciphers_Available[*pbes2EncAlgorithm]; !ok {
+		FailF("Invalid PBES2 Cipher Algorithm: %q", *pbes2EncAlgorithm)
+	} else {
+		encoder.PBES2_EncryptionAlgorithm = v
 	}
 
+	/*
+	 * Parse out the password into the environment
+	 */
 	var password string
 	if *passwordIn == "" {
 		fmt.Fprintf(os.Stderr, "Enter Password for %q: ", files[0])
@@ -83,14 +114,14 @@ func main() {
 		if err != nil {
 			FailF("Error reading password: %v", err)
 		}
-		password = strings.TrimSuffix(string(bytePassword), "\n")
+		password = strings.TrimSpace(string(bytePassword))
 	} else {
 		parts := strings.SplitN(*passwordIn, ":", 2)
 		if len(parts) < 2 {
 			FailF("Invalied password parameter")
 		}
 		switch parts[0] {
-		case "str":
+		case "pass":
 			password = parts[1]
 		case "file":
 			dat, err := os.ReadFile(parts[1])
@@ -100,103 +131,208 @@ func main() {
 			password = strings.TrimSpace(string(dat))
 		case "env":
 			password = os.Getenv(parts[1])
+		default:
+			FailF("Invalid password input format")
 		}
+	}
+	encoder.Password = []rune(password)
+	P12 := &pkcs12.P12{
+		Password: []rune(password),
 	}
 
 	dat, err := os.ReadFile(files[0])
+	if err != nil {
+		if parts := strings.Split(files[0], ","); len(parts) == 2 {
+			dat0, err := os.ReadFile(parts[0])
+			if err != nil {
+				FailF("Error reading file: %v", err)
+			}
+			dat1, err := os.ReadFile(parts[1])
+			if err != nil {
+				FailF("Error reading file: %v", err)
+			}
+			dat = append(append(dat0, '\n'), dat1...)
+		}
+	}
 	if err != nil || len(dat) < 100 {
 		FailF("Error reading file: %v", err)
 	}
 
-	var privateKey interface{}
-	var chain []*x509.Certificate
-	var cert *x509.Certificate
-	var ks = keystore.New()
+	var keys []interface{}
+	var certs []*x509.Certificate
+	var ks *jks.Keystore
 
-	//	fmt.Printf("%02x\n", dat[:4])
-	// Try reading JKS file
-	if bytes.Equal(dat[:4], []byte{0xfe, 0xed, 0xfe, 0xed}) {
-		err = ks.Load(bytes.NewReader(dat), []byte(password))
+	/*
+	 * Try reading PEM file
+	 */
+	for block, remain := pem.Decode(dat); block != nil; block, remain = pem.Decode(remain) {
+		if strings.HasSuffix(block.Type, "PRIVATE KEY") {
+			var pkey []byte
+			if x509.IsEncryptedPEMBlock(block) {
+				pkey, err = x509.DecryptPEMBlock(block, []byte(password))
+				if err != nil {
+					FailF("Error decoding PEM key: %v", err)
+				}
+			} else {
+				pkey = block.Bytes
+			}
+			if priv, err := parsePrivateKey(pkey); err != nil {
+				FailF("Unable to parse private key: %v", err)
+			} else {
+				keys = append(keys, priv)
+			}
+		} else if block.Type == "CERTIFICATE" {
+			x509Cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				FailF("Invalid cert: %v", err)
+			}
+			certs = append(certs, x509Cert)
+		}
+	}
+	/*
+		for i, c := range chain {
+			if findCert(c, privateKey) == nil {
+				cert = c
+				chain = append(chain[:i], chain[i+1:]...)
+				break
+			}
+		}
+	*/
+
+	/*
+	 * Try reading a JKS file
+	 */
+	if len(certs) == 0 && bytes.Equal(dat[:4], []byte{0xFE, 0xED, 0xFE, 0xED}) {
+		// Try reading JKS file
+		ks, err = jks.Parse(dat, &jks.Options{Password: password})
 		if err != nil {
 			FailF("Error reading JKS file %q: %v", files[0], err)
 		}
-		//var privateKey keystore.PrivateKeyEntry
-		for _, alias := range ks.Aliases() {
-			if ks.IsPrivateKeyEntry(alias) {
-				PrivateKeyEntry, err := ks.GetPrivateKeyEntry(alias, []byte(password))
-				if err != nil {
-					FailF("Error decoding private key %q", files[0])
-				}
-				//fmt.Printf("key: %#v\n", PrivateKeyEntry)
-
-				if privateKey, err = parsePrivateKey(PrivateKeyEntry.PrivateKey); err != nil {
-					FailF("Unable to parse private key: %v", err)
-				}
-				for _, c := range PrivateKeyEntry.CertificateChain {
-					if c.Type != "X.509" {
-						FailF("Unknown cert type: %q", c.Type)
-					}
-					x509Cert, err := x509.ParseCertificate(c.Content)
-					if err != nil {
-						FailF("Invalid cert: %v", err)
-					}
-
-					if findCert(x509Cert, privateKey) == nil {
-						cert = x509Cert
-					} else {
-						chain = append(chain, x509Cert)
-					}
+		for _, c := range ks.Certs {
+			if c.Cert != nil {
+				certs = append(certs, c.Cert)
+			}
+		}
+		for _, k := range ks.Keypairs {
+			keys = append(keys, k.PrivateKey)
+			for _, c := range k.CertChain {
+				if c.Cert != nil {
+					certs = append(certs, c.Cert)
 				}
 			}
 		}
-	} else {
+	}
+
+	if len(certs) == 0 {
 		// Try reading p12 file
 		if dec, err := base64.StdEncoding.DecodeString(string(dat)); err == nil {
 			dat = []byte(dec)
 		}
-		privateKey, cert, chain, err = pkcs12.DecodeChain(dat, password)
+		err = pkcs12.Unmarshal(dat, P12)
 		if err != nil {
 			FailF("Error reading P12 file %q: %v", files[0], err)
 		}
-		if err = findCert(cert, privateKey); err != nil {
-			FailF("Key - Certificate matching error: %v", err)
-		}
 
-		privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
-		if err != nil {
-			FailF("Error marshalling private key: %v", err)
-		}
-		var ksChain []keystore.Certificate
-		for _, c := range append([]*x509.Certificate{cert}, chain...) {
-			ksChain = append(ksChain, keystore.Certificate{
-				Type:    "X.509",
-				Content: c.Raw,
-			})
-		}
+		//fmt.Printf("p12: %#v\n", P12)
 
-		ks.SetPrivateKeyEntry("1", keystore.PrivateKeyEntry{
-			CreationTime:     time.Now(),
-			PrivateKey:       privateDER,
-			CertificateChain: ksChain,
-		}, []byte(password))
+		for _, k := range P12.KeyEntries {
+			keys = append(keys, k.Key)
+		}
+		for _, c := range P12.CertEntries {
+			certs = append(certs, c.Cert)
+		}
+		/*	var ksChain []keystore.Certificate
+			for _, c := range P12.CertEntries {
+				if findCert(c, k.Key) == nil {
+					ksChain = append(ksChain, keystore.Certificate{
+						Type:    "X.509",
+						Content: c.Cert.Raw,
+					})
+				}
+			}
+
+			privateDER, err := x509.MarshalPKCS8PrivateKey(k.Key)
+			if err != nil {
+				FailF("Error marshalling private key: %v", err)
+			}
+			ks.SetPrivateKeyEntry(fmt.Sprintf("%d", i+1), keystore.PrivateKeyEntry{
+				CreationTime:     time.Now(),
+				PrivateKey:       privateDER,
+				CertificateChain: ksChain,
+			}, []byte(password))
+		}*/
 	}
 
-	if cert == nil {
+	if len(certs) == 0 {
 		FailF("No certificate found.")
 	}
 
-	// Build JKS blob
-	var buf bytes.Buffer
-	err = ks.Store(&buf, []byte(password))
-	if err != nil {
-		FailF("Error building KS: %v", err)
-	}
-	jksDat := buf.Bytes()
+	var p12Dat, jksDat []byte
+	if len(keys) > 0 {
+		// Case when the file has keys
+		ks = &jks.Keystore{}
+		for _, key := range keys {
+			keypair := &jks.Keypair{PrivateKey: key}
+			keyentry := pkcs12.KeyEntry{Key: key}
+			certentry := pkcs12.CertEntry{}
+			for _, c := range certs {
+				if findCert(c, key) == nil {
+					keypair.CertChain = []*jks.KeypairCert{&jks.KeypairCert{
+						Cert: c,
+						Raw:  c.Raw,
+					}}
+					keypair.Alias = c.Subject.CommonName
+					keypair.Timestamp = time.Now()
+					keyentry.FriendlyName = c.Subject.CommonName
+					certentry.Cert = c
+					certentry.FriendlyName = c.Subject.CommonName
+					for i := findNext(c, certs); i != nil; i = findNext(i, certs) {
+						keypair.CertChain = append(keypair.CertChain, &jks.KeypairCert{Raw: i.Raw, Cert: i})
+					}
+					break
+				}
+			}
+			encoder.KeyEntries = append(encoder.KeyEntries, keyentry)
+			encoder.CertEntries = append(encoder.CertEntries, certentry)
+			ks.Keypairs = append(ks.Keypairs, keypair)
+		}
+		encoder.GenerateSalts(*saltLength)
 
-	// Build P12 blob
-	p12Dat, err := (*pkcs12.Encoder)(unsafe.Pointer(&encoder)).Encode(privateKey, cert, chain, password)
-	if err != nil {
-		FailF("Error encoding pkcs12: %v", err)
+		// Build P12 blob
+		p12Dat, err = pkcs12.Marshal(encoder)
+		if err != nil {
+			FailF("Error encoding pkcs12: %v", err)
+		}
+
+		// Build JKS blob
+		jksDat, err = ks.Pack(&jks.Options{Password: password})
+		if err != nil {
+			FailF("Error building KS: %v", err)
+		}
+	} else {
+		ts := &pkcs12.TrustStore{
+			MACAlgorithm:              encoder.MACAlgorithm,
+			CertBagAlgorithm:          encoder.CertBagAlgorithm,
+			Password:                  encoder.Password,
+			MACIterations:             encoder.MACIterations,
+			EncryptionIterations:      encoder.EncryptionIterations,
+			PBES2_EncryptionAlgorithm: encoder.PBES2_HMACAlgorithm,
+			PBES2_HMACAlgorithm:       encoder.PBES2_EncryptionAlgorithm,
+		}
+		ts.GenerateSalts(*saltLength)
+		for _, c := range certs {
+			ts.Entries = append(ts.Entries, pkcs12.TrustStoreEntry{
+				FriendlyName: c.Subject.CommonName,
+				Cert:         c,
+			})
+		}
+
+		// Build P12 blob
+		p12Dat, err = pkcs12.MarshalTrustStore(ts)
+		if err != nil {
+			FailF("Error encoding pkcs12: %v", err)
+		}
+		jksDat = p12Dat
 	}
 
 	for _, outFile := range files[1:] {
@@ -207,6 +343,43 @@ func main() {
 		} else if strings.HasPrefix(outFile, "jks:") {
 			outFile = outFile[4:]
 			toWrite = jksDat
+		} else if pre := strings.HasPrefix(outFile, "ukey:"); pre || strings.HasSuffix(outFile, ".ukey") {
+			if pre {
+				outFile = outFile[5:]
+			}
+			for _, key := range keys {
+				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+				if err != nil {
+					FailF("Error encoding key: %v", err)
+				}
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "PRIVATE KEY"})...)
+			}
+		} else if pre := strings.HasPrefix(outFile, "cert:"); pre || strings.HasSuffix(outFile, ".cert") {
+			if pre {
+				outFile = outFile[5:]
+			}
+			for _, c := range certs {
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
+			}
+		} else if pre := strings.HasPrefix(outFile, "crt:"); pre || strings.HasSuffix(outFile, ".crt") {
+			if pre {
+				outFile = outFile[4:]
+			}
+			for _, c := range certs {
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
+			}
+		} else if strings.HasPrefix(outFile, "both:") {
+			outFile = outFile[5:]
+			for _, key := range keys {
+				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+				if err != nil {
+					FailF("Error encoding key: %v", err)
+				}
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "PRIVATE KEY"})...)
+			}
+			for _, c := range certs {
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
+			}
 		} else if strings.HasSuffix(outFile, ".p12") || strings.HasSuffix(outFile, ".pfx") {
 			toWrite = p12Dat
 		} else if strings.HasSuffix(outFile, ".jks") {
@@ -224,23 +397,6 @@ func main() {
 
 	//fmt.Printf("keystore: %#v\n", ks)
 	//fmt.Printf("key: %#v\ncert: %#v\nca: %#v\n", privateKey, cert, chain)
-}
-
-var algoMap = map[string]asn1.ObjectIdentifier{
-	"PBEWithSHAAnd3KeyTripleDESCBC": asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 1, 3}),
-	"PBEWithSHAAnd128BitRC2CBC":     asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 1, 5}),
-	"PBEWithSHAAnd40BitRC2CBC":      asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 1, 6}),
-	"PBES2":                         asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 5, 13}),
-	"PBKDF2":                        asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 5, 12}),
-	"HmacWithSHA1":                  asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 2, 7}),
-	"HmacWithSHA256":                asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 2, 9}),
-	"AES128CBC":                     asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 2}),
-	"AES192CBC":                     asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 22}),
-	"AES256CBC":                     asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 42}),
-}
-var hashMap = map[string]asn1.ObjectIdentifier{
-	"SHA1":   asn1.ObjectIdentifier([]int{1, 3, 14, 3, 2, 26}),
-	"SHA256": asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 2, 1}),
 }
 
 func mapToSlice(in map[string]asn1.ObjectIdentifier) (out []string) {
@@ -288,6 +444,23 @@ func parsePrivateKey(der []byte) (crypto.PrivateKey, error) {
 	return nil, errors.New("tls: failed to parse private key")
 }
 
+func findNext(pub *x509.Certificate, list []*x509.Certificate) (next *x509.Certificate) {
+	if pub.Subject.String() == pub.Issuer.String() {
+		return nil
+	}
+	for _, c := range list {
+		if c == pub {
+			continue
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(c)
+		opts := x509.VerifyOptions{Roots: roots}
+		if _, err := pub.Verify(opts); err == nil {
+			return c
+		}
+	}
+	return nil
+}
 func findCert(pub *x509.Certificate, priv interface{}) error {
 	switch pub := pub.PublicKey.(type) {
 	case *rsa.PublicKey:

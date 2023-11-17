@@ -3,5 +3,5 @@ FLAGS := "-s -w -X main.version=${VERSION}"
 
 
 build:
-	CGO_ENABLED=0 go build -ldflags=${FLAGS} -o pkcs12 .
-	upx --lzma pkcs12
+	CGO_ENABLED=0 go build -ldflags=${FLAGS} -o pkcs .
+	upx --lzma pkcs
