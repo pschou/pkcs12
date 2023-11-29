@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
@@ -32,8 +33,9 @@ var (
 	passwordOut = flag.String("outpass", "same-as-in", "Provide output password for written files\n"+
 		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"")
 	certAlgorithm = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
-	matchString   = flag.String("match", "cn~=.*", "Include only certificates matching an expression.\n"+
+	matchString   = flag.String("match", "cn=~.*", "Include only certificates matching an expression.\n"+
 		"Example: 'cn=my.domain' or for matching two 'cn~=test.*,o=\"my org\"'\n"+
+		"= equal, =~ regex match, != not equal, !~ regex doesn't match\n"+
 		"To match issuer use issuer_cn=\"my.ca\"")
 	keyAlgorithm       = flag.String("keyAlgorithm", "PBES2", "Key Algorithm")
 	macAlgorithm       = flag.String("macAlgorithm", "SHA256", "Key Algorithm")
@@ -57,11 +59,12 @@ func main() {
 			"Flags:\n")
 		flag.PrintDefaults()
 		fmt.Fprint(os.Stderr, "Output formats can be set by a prefix (ie crt:myfile) or suffix (myfile.crt).\n  ",
-			"cert    - only certificates\n  ",
-			"ukey    - unencrypted key\n  ",
-			"p12 pfx - pkcs12 encoded key\n  ",
-			"jks     - java keystore key\n  ",
-			"both:   - prefix to indicate both the private and public key in one file\n",
+			"cert:filename filename.crt  - only certificates\n  ",
+			"key:filename  filename.key - unencrypted key\n  ",
+			"ukey:filename filename.ukey - unencrypted key\n  ",
+			"p12:filename  filename.p12  - pkcs12 encoded key\n  ",
+			"jks:filename  filename.jks  - java keystore key\n  ",
+			"both:filename               - prefix to indicate both the private and public key in one file\n",
 		)
 		fmt.Fprint(os.Stderr, "PBE Algorithms Available:\n  ", strings.Join(mapToSlice(pkcs12.PBE_Algorithms_Available), ", "), "\n")
 		fmt.Fprint(os.Stderr, "PBE MACs Available:\n  ", strings.Join(mapToSlice(pkcs12.PBE_MACs_Available), ", "), "\n")
@@ -419,6 +422,18 @@ func main() {
 		} else if strings.HasPrefix(outFile, "jks:") {
 			outFile = outFile[4:]
 			toWrite = jksDat
+		} else if pre := strings.HasPrefix(outFile, "key:"); pre || strings.HasSuffix(outFile, ".key") {
+			if pre {
+				outFile = outFile[4:]
+			}
+			for _, key := range keys {
+				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+				if err != nil {
+					FailF("Error encoding key: %v", err)
+				}
+				encrypted, err := x509.EncryptPEMBlock(rand.Reader, "PRIVATE KEY", privateDER, []byte(*passwordOut), x509.PEMCipherAES256)
+				toWrite = append(toWrite, pem.EncodeToMemory(encrypted)...)
+			}
 		} else if pre := strings.HasPrefix(outFile, "ukey:"); pre || strings.HasSuffix(outFile, ".ukey") {
 			if pre {
 				outFile = outFile[5:]

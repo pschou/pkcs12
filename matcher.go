@@ -18,19 +18,19 @@ func newMatcher(str string) *matcher {
 	for i := 0; ; i++ {
 		switch {
 		case str[i:i+1] == "=":
-			return &matcher{field: str[:i], str: str[i+1:]}
+			return &matcher{field: str[:i], str: unquote(str[i+1:])}
 		case i == len(str)-1:
 			break
-		case str[i:i+2] == "~=":
-			if r, err := regexp.Compile(str[i+2:]); err == nil {
+		case str[i:i+2] == "=~":
+			if r, err := regexp.Compile(unquote(str[i+2:])); err == nil {
 				return &matcher{field: str[:i], reg: r}
 			} else if err != nil {
 				FailF("Invalid regexp %q", str[i+2:])
 			}
 		case str[i:i+2] == "!=":
-			return &matcher{field: str[:i], str: str[i+3:], negate: true}
+			return &matcher{field: str[:i], str: unquote(str[i+2:]), negate: true}
 		case str[i:i+2] == "!~":
-			if r, err := regexp.Compile(str[i+2:]); err == nil {
+			if r, err := regexp.Compile(unquote(str[i+2:])); err == nil {
 				return &matcher{field: str[:i], reg: r, negate: true}
 			} else if err != nil {
 				FailF("Invalid regexp %q", str[i+2:])
@@ -40,6 +40,16 @@ func newMatcher(str string) *matcher {
 	//}
 	FailF("Invalid matching expression %q", str)
 	return nil
+}
+
+func unquote(str string) string {
+	if len(str) < 2 {
+		return str
+	}
+	if a, z := str[0], str[len(str)-1]; (a == '"' && z == '"') || (a == '\'' || z == '\'') {
+		return str[1 : len(str)-1]
+	}
+	return str
 }
 
 // Encode a certificate into a string using RFC2253
