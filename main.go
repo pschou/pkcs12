@@ -27,9 +27,14 @@ import (
 )
 
 var (
-	passwordIn = flag.String("passin", "", "Provide password from alternate source\n"+
+	passwordIn = flag.String("inpass", "", "Provide password for reading encrypted file (ignored if not encrypted)\n"+
 		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"")
-	certAlgorithm      = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
+	passwordOut = flag.String("outpass", "same-as-in", "Provide output password for written files\n"+
+		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"")
+	certAlgorithm = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
+	matchString   = flag.String("match", "cn~=.*", "Include only certificates matching an expression.\n"+
+		"Example: 'cn=my.domain' or for matching two 'cn~=test.*,o=\"my org\"'\n"+
+		"To match issuer use issuer_cn=\"my.ca\"")
 	keyAlgorithm       = flag.String("keyAlgorithm", "PBES2", "Key Algorithm")
 	macAlgorithm       = flag.String("macAlgorithm", "SHA256", "Key Algorithm")
 	pbes2HmacAlgorithm = flag.String("pbes2-hmac", "SHA256", "Key Algorithm")
@@ -37,6 +42,8 @@ var (
 	saltLength         = flag.Int("saltLength", 20, "Define the length of the salt")
 	iterations         = flag.Int("iterations", 10000, "Define the number of iterations")
 	version            string
+
+	matchers []*matcher
 )
 
 func main() {
@@ -44,7 +51,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pkcs, Version", version, "(https://github.com/pschou/pkcs)")
 		_, exec := path.Split(os.Args[0])
 		fmt.Fprint(os.Stderr, "Usage:\n  "+exec+" [flags] in_file.p12 [out_file.p12 out_file.jks ...]\n  "+
-			exec+" [flags] in_file.jks [out_file.jks out_file.p12...]\n"+
+			exec+" [flags] in_file.jks [out_file.jks out_file.p12...]\n  "+
+			exec+" [flags] in_crt.pem,in_key.pem [out_file.jks out_file.p12...]  # for a pair of pem files\n"+
 			"Note: Input and output can be the same name for an in place conversion.\n"+
 			"Flags:\n")
 		flag.PrintDefaults()
@@ -77,6 +85,16 @@ func main() {
 		MACIterations:        uint(*iterations),
 		EncryptionIterations: uint(*iterations),
 	}
+
+	{ // compile matchers
+		matchSlice := sliceQuotedString(*matchString)
+		for _, s := range matchSlice {
+			m := newMatcher(s)
+			matchers = append(matchers, m)
+		}
+	}
+
+	// check algorithms
 	if v, ok := pkcs12.PBE_MACs_Available[*macAlgorithm]; !ok {
 		FailF("Invalid MAC PBE Algorithm: %q", *macAlgorithm)
 	} else {
@@ -104,9 +122,8 @@ func main() {
 	}
 
 	/*
-	 * Parse out the password into the environment
+	 * Parse out the input password
 	 */
-	var password string
 	if *passwordIn == "" {
 		fmt.Fprintf(os.Stderr, "Enter Password for %q: ", files[0])
 		bytePassword, err := term.ReadPassword(int(syscall.Stdin))
@@ -114,7 +131,7 @@ func main() {
 		if err != nil {
 			FailF("Error reading password: %v", err)
 		}
-		password = strings.TrimSpace(string(bytePassword))
+		*passwordIn = strings.TrimSpace(string(bytePassword))
 	} else {
 		parts := strings.SplitN(*passwordIn, ":", 2)
 		if len(parts) < 2 {
@@ -122,23 +139,55 @@ func main() {
 		}
 		switch parts[0] {
 		case "pass":
-			password = parts[1]
+			*passwordIn = parts[1]
 		case "file":
 			dat, err := os.ReadFile(parts[1])
 			if err != nil {
 				FailF("Error reading password file: %v", err)
 			}
-			password = strings.TrimSpace(string(dat))
+			*passwordIn = strings.TrimSpace(string(dat))
 		case "env":
-			password = os.Getenv(parts[1])
+			*passwordIn = os.Getenv(parts[1])
 		default:
 			FailF("Invalid password input format")
 		}
 	}
-	encoder.Password = []rune(password)
-	P12 := &pkcs12.P12{
-		Password: []rune(password),
+
+	/*
+	 * Parse out the output password
+	 */
+	if *passwordOut == "same-as-in" {
+		*passwordOut = *passwordIn
+	} else if *passwordOut == "" {
+		fmt.Fprintf(os.Stderr, "Enter Password for %q: ", files[0])
+		bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			FailF("Error reading password: %v", err)
+		}
+		*passwordOut = strings.TrimSpace(string(bytePassword))
+	} else {
+		parts := strings.SplitN(*passwordOut, ":", 2)
+		if len(parts) < 2 {
+			FailF("Invalied password parameter")
+		}
+		switch parts[0] {
+		case "pass":
+			*passwordOut = parts[1]
+		case "file":
+			dat, err := os.ReadFile(parts[1])
+			if err != nil {
+				FailF("Error reading password file: %v", err)
+			}
+			*passwordOut = strings.TrimSpace(string(dat))
+		case "env":
+			*passwordOut = os.Getenv(parts[1])
+		default:
+			FailF("Invalid password input format")
+		}
 	}
+
+	encoder.Password = []rune(*passwordOut)
 
 	dat, err := os.ReadFile(files[0])
 	if err != nil {
@@ -169,7 +218,7 @@ func main() {
 		if strings.HasSuffix(block.Type, "PRIVATE KEY") {
 			var pkey []byte
 			if x509.IsEncryptedPEMBlock(block) {
-				pkey, err = x509.DecryptPEMBlock(block, []byte(password))
+				pkey, err = x509.DecryptPEMBlock(block, []byte(*passwordIn))
 				if err != nil {
 					FailF("Error decoding PEM key: %v", err)
 				}
@@ -204,7 +253,7 @@ func main() {
 	 */
 	if len(certs) == 0 && bytes.Equal(dat[:4], []byte{0xFE, 0xED, 0xFE, 0xED}) {
 		// Try reading JKS file
-		ks, err = jks.Parse(dat, &jks.Options{Password: password})
+		ks, err = jks.Parse(dat, &jks.Options{Password: *passwordIn})
 		if err != nil {
 			FailF("Error reading JKS file %q: %v", files[0], err)
 		}
@@ -224,6 +273,7 @@ func main() {
 	}
 
 	if len(certs) == 0 {
+		P12 := &pkcs12.P12{Password: []rune(*passwordIn)}
 		// Try reading p12 file
 		if dec, err := base64.StdEncoding.DecodeString(string(dat)); err == nil {
 			dat = []byte(dec)
@@ -268,15 +318,23 @@ func main() {
 	}
 
 	var p12Dat, jksDat []byte
+	// If a key was provided, loop over the keys and build the certificate chains
 	if len(keys) > 0 {
-		// Case when the file has keys
 		ks = &jks.Keystore{}
+		var new_certs []*x509.Certificate
+		var dedup_certs = make(map[*x509.Certificate]struct{})
+
+	key_loop:
 		for _, key := range keys {
 			keypair := &jks.Keypair{PrivateKey: key}
 			keyentry := pkcs12.KeyEntry{Key: key}
 			certentry := pkcs12.CertEntry{}
 			for _, c := range certs {
 				if findCert(c, key) == nil {
+					//fmt.Println("common name", c.Subject.CommonName, include.MatchString(c.Subject.CommonName), (exclude != nil && exclude.MatchString(c.Subject.CommonName)))
+					if !matchNames(matchers, c.Subject, c.Issuer) {
+						continue key_loop
+					}
 					keypair.CertChain = []*jks.KeypairCert{&jks.KeypairCert{
 						Cert: c,
 						Raw:  c.Raw,
@@ -286,12 +344,23 @@ func main() {
 					keyentry.FriendlyName = c.Subject.CommonName
 					certentry.Cert = c
 					certentry.FriendlyName = c.Subject.CommonName
+					// add the cert only if needed
+					if _, ok := dedup_certs[c]; !ok {
+						new_certs = append(new_certs, c)
+						dedup_certs[c] = struct{}{}
+					}
 					for i := findNext(c, certs); i != nil; i = findNext(i, certs) {
 						keypair.CertChain = append(keypair.CertChain, &jks.KeypairCert{Raw: i.Raw, Cert: i})
+						// add the cert only if needed
+						if _, ok := dedup_certs[i]; !ok {
+							new_certs = append(new_certs, i)
+							dedup_certs[i] = struct{}{}
+						}
 					}
 					break
 				}
 			}
+			certs = new_certs
 			encoder.KeyEntries = append(encoder.KeyEntries, keyentry)
 			encoder.CertEntries = append(encoder.CertEntries, certentry)
 			ks.Keypairs = append(ks.Keypairs, keypair)
@@ -305,7 +374,7 @@ func main() {
 		}
 
 		// Build JKS blob
-		jksDat, err = ks.Pack(&jks.Options{Password: password})
+		jksDat, err = ks.Pack(&jks.Options{Password: *passwordOut})
 		if err != nil {
 			FailF("Error building KS: %v", err)
 		}
@@ -316,16 +385,22 @@ func main() {
 			Password:                  encoder.Password,
 			MACIterations:             encoder.MACIterations,
 			EncryptionIterations:      encoder.EncryptionIterations,
-			PBES2_EncryptionAlgorithm: encoder.PBES2_HMACAlgorithm,
-			PBES2_HMACAlgorithm:       encoder.PBES2_EncryptionAlgorithm,
+			PBES2_EncryptionAlgorithm: encoder.PBES2_EncryptionAlgorithm,
+			PBES2_HMACAlgorithm:       encoder.PBES2_HMACAlgorithm,
 		}
 		ts.GenerateSalts(*saltLength)
+		var new_certs []*x509.Certificate
 		for _, c := range certs {
+			if !matchNames(matchers, c.Subject, c.Issuer) {
+				continue
+			}
+			new_certs = append(new_certs, c)
 			ts.Entries = append(ts.Entries, pkcs12.TrustStoreEntry{
 				FriendlyName: c.Subject.CommonName,
 				Cert:         c,
 			})
 		}
+		certs = new_certs
 
 		// Build P12 blob
 		p12Dat, err = pkcs12.MarshalTrustStore(ts)
@@ -335,6 +410,7 @@ func main() {
 		jksDat = p12Dat
 	}
 
+	// Loop over outputs and write out results
 	for _, outFile := range files[1:] {
 		var toWrite []byte
 		if strings.HasPrefix(outFile, "p12:") || strings.HasPrefix(outFile, "pfx:") {
@@ -354,18 +430,17 @@ func main() {
 				}
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "PRIVATE KEY"})...)
 			}
-		} else if pre := strings.HasPrefix(outFile, "cert:"); pre || strings.HasSuffix(outFile, ".cert") {
+		} else if pre := strings.HasPrefix(outFile, "cert:"); pre || strings.HasSuffix(outFile, ".cert") || strings.HasSuffix(outFile, ".crt") {
 			if pre {
 				outFile = outFile[5:]
 			}
 			for _, c := range certs {
-				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
-			}
-		} else if pre := strings.HasPrefix(outFile, "crt:"); pre || strings.HasSuffix(outFile, ".crt") {
-			if pre {
-				outFile = outFile[4:]
-			}
-			for _, c := range certs {
+				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
+				if PKIString(c.Subject) != PKIString(c.Issuer) {
+					toWrite = append(toWrite, []byte(fmt.Sprintf("issuer=%s\n", PKIString(c.Issuer)))...)
+				}
+				toWrite = append(toWrite, []byte(fmt.Sprintf("created=%s\n", c.NotBefore))...)
+				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
 			}
 		} else if strings.HasPrefix(outFile, "both:") {
@@ -378,6 +453,12 @@ func main() {
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "PRIVATE KEY"})...)
 			}
 			for _, c := range certs {
+				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
+				if PKIString(c.Subject) != PKIString(c.Issuer) {
+					toWrite = append(toWrite, []byte(fmt.Sprintf("issuer=%s\n", PKIString(c.Issuer)))...)
+				}
+				toWrite = append(toWrite, []byte(fmt.Sprintf("created=%s\n", c.NotBefore))...)
+				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
 			}
 		} else if strings.HasSuffix(outFile, ".p12") || strings.HasSuffix(outFile, ".pfx") {

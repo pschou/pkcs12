@@ -1,0 +1,37 @@
+# github.com/htruong/go-md2 v0.0.0-20170914203617-c69905b63f6f
+## explicit
+github.com/htruong/go-md2
+# github.com/lwithers/minijks v1.1.0
+## explicit; go 1.17
+github.com/lwithers/minijks/jks
+# github.com/pedroalbanese/gogost v0.0.0-20230322180232-96c30f39056b
+## explicit; go 1.12
+github.com/pedroalbanese/gogost/gost34112012256
+github.com/pedroalbanese/gogost/gost34112012512
+github.com/pedroalbanese/gogost/internal/gost34112012
+# github.com/pschou/go-pkcs12 v0.0.0-20231117202800-50a69f588aa2
+## explicit; go 1.15
+github.com/pschou/go-pkcs12
+github.com/pschou/go-pkcs12/internal/rc2
+# golang.org/x/crypto v0.15.0
+## explicit; go 1.18
+golang.org/x/crypto/blowfish
+golang.org/x/crypto/chacha20
+golang.org/x/crypto/curve25519
+golang.org/x/crypto/curve25519/internal/field
+golang.org/x/crypto/internal/alias
+golang.org/x/crypto/internal/poly1305
+golang.org/x/crypto/md4
+golang.org/x/crypto/pbkdf2
+golang.org/x/crypto/sha3
+golang.org/x/crypto/ssh
+golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
+# golang.org/x/sys v0.14.0
+## explicit; go 1.18
+golang.org/x/sys/cpu
+golang.org/x/sys/plan9
+golang.org/x/sys/unix
+golang.org/x/sys/windows
+# golang.org/x/term v0.14.0
+## explicit; go 1.18
+golang.org/x/term
