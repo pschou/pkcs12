@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
@@ -491,26 +490,15 @@ func main() {
 			}
 		case "pkcs8key":
 			for _, key := range keys {
-				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
-				if err != nil {
-					FailF("Error encoding key: %v", err)
-				}
+
 				salt := make([]byte, 8)
 				if _, err = rand.Read(salt); err != nil {
 					FailF("Couldn't get random: %v", err)
 				}
-				params, err := pkcs12.MakePBES2Parameters(rand.Reader, encoder.PBES2_HMACAlgorithm, encoder.PBES2_EncryptionAlgorithm, salt, int(encoder.MACIterations))
+				encryptedDER, err := pkcs12.EncodePkcs8ShroudedKeyBagWithPassword(rand.Reader, key, []rune(*passwordIn),
+					encoder.KeyBagAlgorithm, encoder.PBES2_HMACAlgorithm, encoder.PBES2_EncryptionAlgorithm, encoder.MACIterations, salt)
 				if err != nil {
-					FailF("Invalid parameters for encoding PBES2 into pkcs8: %v", err)
-				}
-				info := encryptedContentInfo{ContentEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: pkcs12.OidPBES2, Parameters: asn1.RawValue{FullBytes: params}}}
-				err = pkcs12.BagEncrypt(&info, privateDER, []rune(*passwordIn))
-				if err != nil {
-					FailF("Error encoding private key: %v", err)
-				}
-				encryptedDER, err := asn1.Marshal(info)
-				if err != nil {
-					FailF("Error decoding private key: %v", err)
+					FailF("Error encoding key: %v", err)
 				}
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: encryptedDER, Type: "ENCRYPTED PRIVATE KEY"})...)
 			}
@@ -546,14 +534,6 @@ func main() {
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
 			}
 		case "pkcs1cert8key":
-			for _, key := range keys {
-				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
-				if err != nil {
-					FailF("Error encoding key: %v", err)
-				}
-				encrypted, err := x509.EncryptPEMBlock(rand.Reader, "ENCRYPTED PRIVATE KEY", privateDER, []byte(*passwordOut), pcs8Algo)
-				toWrite = append(toWrite, pem.EncodeToMemory(encrypted)...)
-			}
 			for _, c := range certs {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
 				if len(c.DNSNames) > 0 {
@@ -568,6 +548,18 @@ func main() {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("created=%s\n", c.NotBefore))...)
 				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
+			}
+			for _, key := range keys {
+				salt := make([]byte, 8)
+				if _, err = rand.Read(salt); err != nil {
+					FailF("Couldn't get random: %v", err)
+				}
+				encryptedDER, err := pkcs12.EncodePkcs8ShroudedKeyBagWithPassword(rand.Reader, key, []rune(*passwordIn),
+					encoder.KeyBagAlgorithm, encoder.PBES2_HMACAlgorithm, encoder.PBES2_EncryptionAlgorithm, encoder.MACIterations, salt)
+				if err != nil {
+					FailF("Error encoding key: %v", err)
+				}
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: encryptedDER, Type: "ENCRYPTED PRIVATE KEY"})...)
 			}
 		case "pkcs1cert8ukey":
 			for _, key := range keys {
