@@ -17,16 +17,16 @@ func newMatcher(str string) *matcher {
 	//	str = str[:len(str)]
 	for i := 0; ; i++ {
 		switch {
-		case str[i:i+1] == "=":
-			return &matcher{field: str[:i], str: unquote(str[i+1:])}
-		case i == len(str)-1:
-			break
-		case str[i:i+2] == "=~":
+		case i < len(str)-1 && str[i:i+2] == "=~":
 			if r, err := regexp.Compile(unquote(str[i+2:])); err == nil {
 				return &matcher{field: str[:i], reg: r}
 			} else if err != nil {
 				FailF("Invalid regexp %q", str[i+2:])
 			}
+		case str[i:i+1] == "=":
+			return &matcher{field: str[:i], str: unquote(str[i+1:])}
+		case i == len(str)-1:
+			break
 		case str[i:i+2] == "!=":
 			return &matcher{field: str[:i], str: unquote(str[i+2:]), negate: true}
 		case str[i:i+2] == "!~":
@@ -57,7 +57,9 @@ func matchNames(tests []*matcher, subject, issuer pkix.Name) (ret bool) {
 	// loop over the certificate fields
 	for i := range subject.Names {
 		parts := strings.SplitN(pkix.RDNSequence([]pkix.RelativeDistinguishedNameSET{subject.Names[i : i+1]}).String(), "=", 2)
+		//fmt.Println("filter match called for", parts)
 		for _, t := range tests {
+			//fmt.Printf("test: %#v\n", t)
 			if strings.EqualFold(parts[0], t.field) {
 				if t.reg == nil {
 					if t.str == parts[1] && !t.negate {

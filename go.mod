@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/lwithers/minijks v1.1.0
-	github.com/pschou/go-pkcs12 v0.0.0-20231117202800-50a69f588aa2
+	github.com/pschou/go-pkcs12 v0.0.0-20231201180228-4dde09c581c7
 	golang.org/x/term v0.14.0
 )
 

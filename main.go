@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/pem"
@@ -31,10 +32,11 @@ var (
 	passwordIn = flag.String("inpass", "", "Provide password for reading encrypted file (ignored if not encrypted)\n"+
 		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"")
 	passwordOut = flag.String("outpass", "same-as-in", "Provide output password for written files\n"+
-		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"")
+		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"\n"+
+		"If omitted, the input password is used as the output password.")
 	certAlgorithm = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
 	matchString   = flag.String("match", "cn=~.*", "Include only certificates matching an expression.\n"+
-		"Example: 'cn=my.domain' or for matching two 'cn~=test.*,o=\"my org\"'\n"+
+		"Example: 'cn=my.domain' or for matching two 'cn=~test.*,o=\"my org\"'\n"+
 		"= equal, =~ regex match, != not equal, !~ regex doesn't match\n"+
 		"To match issuer use issuer_cn=\"my.ca\"")
 	keyAlgorithm       = flag.String("keyAlgorithm", "PBES2", "Key Algorithm")
@@ -58,18 +60,14 @@ func main() {
 			"Note: Input and output can be the same name for an in place conversion.\n"+
 			"Flags:\n")
 		flag.PrintDefaults()
-		fmt.Fprint(os.Stderr, "Output formats can be set by a prefix (ie crt:myfile) or suffix (myfile.crt).\n  ",
-			"cert:filename filename.crt  - only certificates\n  ",
-			"key:filename  filename.key - unencrypted key\n  ",
-			"ukey:filename filename.ukey - unencrypted key\n  ",
-			"p12:filename  filename.p12  - pkcs12 encoded key\n  ",
-			"jks:filename  filename.jks  - java keystore key\n  ",
-			"both:filename               - prefix to indicate both the private and public key in one file\n",
+		fmt.Fprint(os.Stderr, "Output formats can be set by a prefix (ie crt:myfile) or suffix (myfile.crt).\n",
+			"Available prefixes:\n  pkcs8key key pkcs8ukey ukey pkcs1ukey pkcs1key pkcs1cert cert pkcs1cert8ukey both pkcs1cert8key pkcs12 jks\n",
+			"Available Suffixes:\n  cert crt p12 pfx key ukey\n",
 		)
-		fmt.Fprint(os.Stderr, "PBE Algorithms Available:\n  ", strings.Join(mapToSlice(pkcs12.PBE_Algorithms_Available), ", "), "\n")
-		fmt.Fprint(os.Stderr, "PBE MACs Available:\n  ", strings.Join(mapToSlice(pkcs12.PBE_MACs_Available), ", "), "\n")
-		fmt.Fprint(os.Stderr, "PBES2 Ciphers Available:\n  ", strings.Join(mapToSlice(pkcs12.PBES2_Ciphers_Available), ", "), "\n")
-		fmt.Fprint(os.Stderr, "PBES2 HMACs Available:\n  ", strings.Join(mapToSlice(pkcs12.PBES2_HMACs_Available), ", "), "\n")
+		fmt.Fprint(os.Stderr, "PBE Algorithms Available:\n  ", stringsJoin(mapToSlice(pkcs12.PBE_Algorithms_Available), ", ", "  ", 100), "\n")
+		fmt.Fprint(os.Stderr, "PBE MACs Available:\n  ", stringsJoin(mapToSlice(pkcs12.PBE_MACs_Available), ", ", "  ", 100), "\n")
+		fmt.Fprint(os.Stderr, "PBES2 Ciphers Available:\n  ", stringsJoin(mapToSlice(pkcs12.PBES2_Ciphers_Available), ", ", "  ", 100), "\n")
+		fmt.Fprint(os.Stderr, "PBES2 HMACs Available:\n  ", stringsJoin(mapToSlice(pkcs12.PBES2_HMACs_Available), ", ", "  ", 100), "\n")
 	}
 	flag.Parse()
 	files := flag.Args()
@@ -118,10 +116,16 @@ func main() {
 	} else {
 		encoder.PBES2_HMACAlgorithm = v
 	}
+	pcs8Algo := x509.PEMCipherAES256
 	if v, ok := pkcs12.PBES2_Ciphers_Available[*pbes2EncAlgorithm]; !ok {
 		FailF("Invalid PBES2 Cipher Algorithm: %q", *pbes2EncAlgorithm)
 	} else {
 		encoder.PBES2_EncryptionAlgorithm = v
+		for i, c := range []string{"DES-CBC", "DES-EDE3-CBC", "AES128CBC", "AES192CBC", "AES256CBC"} {
+			if c == *pbes2EncAlgorithm {
+				pcs8Algo = x509.PEMCipher(i + 1)
+			}
+		}
 	}
 
 	/*
@@ -194,6 +198,7 @@ func main() {
 
 	dat, err := os.ReadFile(files[0])
 	if err != nil {
+		err = nil
 		if parts := strings.Split(files[0], ","); len(parts) == 2 {
 			dat0, err := os.ReadFile(parts[0])
 			if err != nil {
@@ -225,8 +230,22 @@ func main() {
 				if err != nil {
 					FailF("Error decoding PEM key: %v", err)
 				}
+			} else if block.Type == "ENCRYPTED PRIVATE KEY" {
+				var info encryptedContentInfo
+				trailing, err := asn1.Unmarshal(block.Bytes, &info)
+				if err != nil {
+					FailF("Error decoding private key: %v", err)
+				}
+				if len(trailing) != 0 {
+					FailF("Trailing bytes at end of encrypted private key")
+				}
+				pkey, _, _, _, err = pkcs12.BagDecrypt(info, []rune(*passwordIn))
+				if err != nil {
+					FailF("Error decoding private key: %v", err)
+				}
 			} else {
 				pkey = block.Bytes
+				//fmt.Printf("blocks: %02x  %d\n", pkey, len(pkey))
 			}
 			if priv, err := parsePrivateKey(pkey); err != nil {
 				FailF("Unable to parse private key: %v", err)
@@ -254,7 +273,7 @@ func main() {
 	/*
 	 * Try reading a JKS file
 	 */
-	if len(certs) == 0 && bytes.Equal(dat[:4], []byte{0xFE, 0xED, 0xFE, 0xED}) {
+	if len(certs) == 0 && len(keys) == 0 && bytes.Equal(dat[:4], []byte{0xFE, 0xED, 0xFE, 0xED}) {
 		// Try reading JKS file
 		ks, err = jks.Parse(dat, &jks.Options{Password: *passwordIn})
 		if err != nil {
@@ -275,7 +294,7 @@ func main() {
 		}
 	}
 
-	if len(certs) == 0 {
+	if len(certs) == 0 && len(keys) == 0 {
 		P12 := &pkcs12.P12{Password: []rune(*passwordIn)}
 		// Try reading p12 file
 		if dec, err := base64.StdEncoding.DecodeString(string(dat)); err == nil {
@@ -316,138 +335,247 @@ func main() {
 		}*/
 	}
 
-	if len(certs) == 0 {
-		FailF("No certificate found.")
-	}
-
 	var p12Dat, jksDat []byte
-	// If a key was provided, loop over the keys and build the certificate chains
-	if len(keys) > 0 {
-		ks = &jks.Keystore{}
-		var new_certs []*x509.Certificate
-		var dedup_certs = make(map[*x509.Certificate]struct{})
 
-	key_loop:
-		for _, key := range keys {
-			keypair := &jks.Keypair{PrivateKey: key}
-			keyentry := pkcs12.KeyEntry{Key: key}
-			certentry := pkcs12.CertEntry{}
-			for _, c := range certs {
-				if findCert(c, key) == nil {
-					//fmt.Println("common name", c.Subject.CommonName, include.MatchString(c.Subject.CommonName), (exclude != nil && exclude.MatchString(c.Subject.CommonName)))
-					if !matchNames(matchers, c.Subject, c.Issuer) {
-						continue key_loop
-					}
-					keypair.CertChain = []*jks.KeypairCert{&jks.KeypairCert{
-						Cert: c,
-						Raw:  c.Raw,
-					}}
-					keypair.Alias = c.Subject.CommonName
-					keypair.Timestamp = time.Now()
-					keyentry.FriendlyName = c.Subject.CommonName
-					certentry.Cert = c
-					certentry.FriendlyName = c.Subject.CommonName
-					// add the cert only if needed
-					if _, ok := dedup_certs[c]; !ok {
-						new_certs = append(new_certs, c)
-						dedup_certs[c] = struct{}{}
-					}
-					for i := findNext(c, certs); i != nil; i = findNext(i, certs) {
-						keypair.CertChain = append(keypair.CertChain, &jks.KeypairCert{Raw: i.Raw, Cert: i})
-						// add the cert only if needed
-						if _, ok := dedup_certs[i]; !ok {
-							new_certs = append(new_certs, i)
-							dedup_certs[i] = struct{}{}
+	if len(certs) == 0 {
+		fmt.Println("Warning: No certificate found.  Cannot generate stores.")
+	} else {
+		// If a key was provided, loop over the keys and build the certificate chains
+		if len(keys) > 0 {
+			ks = &jks.Keystore{}
+			var new_certs []*x509.Certificate
+			var dedup_certs = make(map[*x509.Certificate]struct{})
+
+		key_loop:
+			for _, key := range keys {
+				keypair := &jks.Keypair{PrivateKey: key}
+				keyentry := pkcs12.KeyEntry{Key: key}
+				certentry := pkcs12.CertEntry{}
+				for _, c := range certs {
+					if findCert(c, key) == nil {
+						//fmt.Println("common name", c.Subject.CommonName, include.MatchString(c.Subject.CommonName), (exclude != nil && exclude.MatchString(c.Subject.CommonName)))
+						if !matchNames(matchers, c.Subject, c.Issuer) {
+							continue key_loop
 						}
+						keypair.CertChain = []*jks.KeypairCert{&jks.KeypairCert{
+							Cert: c,
+							Raw:  c.Raw,
+						}}
+						keypair.Alias = c.Subject.CommonName
+						keypair.Timestamp = time.Now()
+						keyentry.FriendlyName = c.Subject.CommonName
+						certentry.Cert = c
+						certentry.FriendlyName = c.Subject.CommonName
+						// add the cert only if needed
+						if _, ok := dedup_certs[c]; !ok {
+							new_certs = append(new_certs, c)
+							dedup_certs[c] = struct{}{}
+						}
+						for i := findNext(c, certs); i != nil; i = findNext(i, certs) {
+							keypair.CertChain = append(keypair.CertChain, &jks.KeypairCert{Raw: i.Raw, Cert: i})
+							// add the cert only if needed
+							if _, ok := dedup_certs[i]; !ok {
+								new_certs = append(new_certs, i)
+								dedup_certs[i] = struct{}{}
+							}
+						}
+						break
 					}
-					break
 				}
+				certs = new_certs
+				encoder.KeyEntries = append(encoder.KeyEntries, keyentry)
+				encoder.CertEntries = append(encoder.CertEntries, certentry)
+				ks.Keypairs = append(ks.Keypairs, keypair)
+			}
+			encoder.GenerateSalts(*saltLength)
+
+			// Build P12 blob
+			p12Dat, err = pkcs12.Marshal(encoder)
+			if err != nil {
+				FailF("Error encoding pkcs12: %v", err)
+			}
+
+			// Build JKS blob
+			jksDat, err = ks.Pack(&jks.Options{Password: *passwordOut})
+			if err != nil {
+				FailF("Error building KS: %v", err)
+			}
+		} else {
+			ts := &pkcs12.TrustStore{
+				MACAlgorithm:              encoder.MACAlgorithm,
+				CertBagAlgorithm:          encoder.CertBagAlgorithm,
+				Password:                  encoder.Password,
+				MACIterations:             encoder.MACIterations,
+				EncryptionIterations:      encoder.EncryptionIterations,
+				PBES2_EncryptionAlgorithm: encoder.PBES2_EncryptionAlgorithm,
+				PBES2_HMACAlgorithm:       encoder.PBES2_HMACAlgorithm,
+			}
+			ts.GenerateSalts(*saltLength)
+			var new_certs []*x509.Certificate
+			for _, c := range certs {
+				if !matchNames(matchers, c.Subject, c.Issuer) {
+					continue
+				}
+				new_certs = append(new_certs, c)
+				ts.Entries = append(ts.Entries, pkcs12.TrustStoreEntry{
+					FriendlyName: c.Subject.CommonName,
+					Cert:         c,
+				})
 			}
 			certs = new_certs
-			encoder.KeyEntries = append(encoder.KeyEntries, keyentry)
-			encoder.CertEntries = append(encoder.CertEntries, certentry)
-			ks.Keypairs = append(ks.Keypairs, keypair)
-		}
-		encoder.GenerateSalts(*saltLength)
 
-		// Build P12 blob
-		p12Dat, err = pkcs12.Marshal(encoder)
-		if err != nil {
-			FailF("Error encoding pkcs12: %v", err)
-		}
-
-		// Build JKS blob
-		jksDat, err = ks.Pack(&jks.Options{Password: *passwordOut})
-		if err != nil {
-			FailF("Error building KS: %v", err)
-		}
-	} else {
-		ts := &pkcs12.TrustStore{
-			MACAlgorithm:              encoder.MACAlgorithm,
-			CertBagAlgorithm:          encoder.CertBagAlgorithm,
-			Password:                  encoder.Password,
-			MACIterations:             encoder.MACIterations,
-			EncryptionIterations:      encoder.EncryptionIterations,
-			PBES2_EncryptionAlgorithm: encoder.PBES2_EncryptionAlgorithm,
-			PBES2_HMACAlgorithm:       encoder.PBES2_HMACAlgorithm,
-		}
-		ts.GenerateSalts(*saltLength)
-		var new_certs []*x509.Certificate
-		for _, c := range certs {
-			if !matchNames(matchers, c.Subject, c.Issuer) {
-				continue
+			// Build P12 blob
+			p12Dat, err = pkcs12.MarshalTrustStore(ts)
+			if err != nil {
+				FailF("Error encoding pkcs12: %v", err)
 			}
-			new_certs = append(new_certs, c)
-			ts.Entries = append(ts.Entries, pkcs12.TrustStoreEntry{
-				FriendlyName: c.Subject.CommonName,
-				Cert:         c,
-			})
+			jksDat = p12Dat
 		}
-		certs = new_certs
-
-		// Build P12 blob
-		p12Dat, err = pkcs12.MarshalTrustStore(ts)
-		if err != nil {
-			FailF("Error encoding pkcs12: %v", err)
-		}
-		jksDat = p12Dat
 	}
 
 	// Loop over outputs and write out results
 	for _, outFile := range files[1:] {
-		var toWrite []byte
-		if strings.HasPrefix(outFile, "p12:") || strings.HasPrefix(outFile, "pfx:") {
-			outFile = outFile[4:]
-			toWrite = p12Dat
-		} else if strings.HasPrefix(outFile, "jks:") {
-			outFile = outFile[4:]
-			toWrite = jksDat
-		} else if pre := strings.HasPrefix(outFile, "key:"); pre || strings.HasSuffix(outFile, ".key") {
-			if pre {
-				outFile = outFile[4:]
+		var outType string
+		parts := strings.SplitN(outFile, ":", 2)
+		if len(parts) == 2 {
+			switch parts[0] {
+			case "pkcs8key", "key":
+				outType, outFile = parts[0], parts[1]
+			case "pkcs8ukey", "ukey":
+				outType, outFile = parts[0], parts[1]
+			case "pkcs1ukey":
+				outType, outFile = parts[0], parts[1]
+			case "pkcs1key":
+				outType, outFile = parts[0], parts[1]
+			case "pkcs1cert", "cert":
+				outType, outFile = "pkcs1cert", parts[1]
+			case "pkcs1cert8ukey", "both":
+				outType, outFile = "pkcs1cert8ukey", parts[1]
+			case "pkcs1cert8key":
+				outType, outFile = parts[0], parts[1]
+			case "pkcs12":
+				outType, outFile = parts[0], parts[1]
+			case "jks":
+				outType, outFile = parts[0], parts[1]
 			}
+		}
+		if outType == "" {
+			switch {
+			case strings.HasSuffix(outFile, ".cert") || strings.HasSuffix(outFile, ".crt"):
+				outType = "pkcs1cert"
+			case strings.HasSuffix(outFile, ".p12") || strings.HasSuffix(outFile, ".pfx"):
+				outType = "pkcs12"
+			case strings.HasSuffix(outFile, ".key"):
+				outType = "pkcs8key"
+			case strings.HasSuffix(outFile, ".ukey"):
+				outType = "pkcs8ukey"
+			}
+		}
+		if outType == "" {
+			FailF("Unable to determine file type for %q.", outFile)
+		}
+
+		var toWrite []byte
+		switch outType {
+		case "pkcs12":
+			toWrite = p12Dat
+		case "jks":
+			toWrite = jksDat
+		case "pkcs8ukey":
 			for _, key := range keys {
 				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
 				if err != nil {
 					FailF("Error encoding key: %v", err)
 				}
-				encrypted, err := x509.EncryptPEMBlock(rand.Reader, "PRIVATE KEY", privateDER, []byte(*passwordOut), x509.PEMCipherAES256)
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: keyKind(key)})...)
+			}
+		case "pkcs8key":
+			for _, key := range keys {
+				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+				if err != nil {
+					FailF("Error encoding key: %v", err)
+				}
+				salt := make([]byte, 8)
+				if _, err = rand.Read(salt); err != nil {
+					FailF("Couldn't get random: %v", err)
+				}
+				params, err := pkcs12.MakePBES2Parameters(rand.Reader, encoder.PBES2_HMACAlgorithm, encoder.PBES2_EncryptionAlgorithm, salt, int(encoder.MACIterations))
+				if err != nil {
+					FailF("Invalid parameters for encoding PBES2 into pkcs8: %v", err)
+				}
+				info := encryptedContentInfo{ContentEncryptionAlgorithm: pkix.AlgorithmIdentifier{Algorithm: pkcs12.OidPBES2, Parameters: asn1.RawValue{FullBytes: params}}}
+				err = pkcs12.BagEncrypt(&info, privateDER, []rune(*passwordIn))
+				if err != nil {
+					FailF("Error encoding private key: %v", err)
+				}
+				encryptedDER, err := asn1.Marshal(info)
+				if err != nil {
+					FailF("Error decoding private key: %v", err)
+				}
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: encryptedDER, Type: "ENCRYPTED PRIVATE KEY"})...)
+			}
+		case "pkcs1key":
+			for _, key := range keys {
+				if rsakey, ok := key.(*rsa.PrivateKey); ok {
+					privateDER := x509.MarshalPKCS1PrivateKey(rsakey)
+					encrypted, _ := x509.EncryptPEMBlock(rand.Reader, "RSA PRIVATE KEY", privateDER, []byte(*passwordOut), pcs8Algo)
+					toWrite = append(toWrite, pem.EncodeToMemory(encrypted)...)
+				}
+			}
+		case "pkcs1ukey":
+			for _, key := range keys {
+				if rsakey, ok := key.(*rsa.PrivateKey); ok {
+					privateDER := x509.MarshalPKCS1PrivateKey(rsakey)
+					toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "RSA PRIVATE KEY"})...)
+				}
+			}
+		case "pkcs1cert":
+			for _, c := range certs {
+				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
+				if len(c.DNSNames) > 0 {
+					toWrite = append(toWrite, []byte("san_dns="+strings.Join(c.DNSNames, ",")+"\n")...)
+				}
+				if len(c.IPAddresses) > 0 {
+					toWrite = append(toWrite, []byte("san_ip="+JoinIP(c.IPAddresses, ",")+"\n")...)
+				}
+				if PKIString(c.Subject) != PKIString(c.Issuer) {
+					toWrite = append(toWrite, []byte(fmt.Sprintf("issuer=%s\n", PKIString(c.Issuer)))...)
+				}
+				toWrite = append(toWrite, []byte(fmt.Sprintf("created=%s\n", c.NotBefore))...)
+				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
+			}
+		case "pkcs1cert8key":
+			for _, key := range keys {
+				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+				if err != nil {
+					FailF("Error encoding key: %v", err)
+				}
+				encrypted, err := x509.EncryptPEMBlock(rand.Reader, "ENCRYPTED PRIVATE KEY", privateDER, []byte(*passwordOut), pcs8Algo)
 				toWrite = append(toWrite, pem.EncodeToMemory(encrypted)...)
 			}
-		} else if pre := strings.HasPrefix(outFile, "ukey:"); pre || strings.HasSuffix(outFile, ".ukey") {
-			if pre {
-				outFile = outFile[5:]
+			for _, c := range certs {
+				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
+				if len(c.DNSNames) > 0 {
+					toWrite = append(toWrite, []byte("san_dns="+strings.Join(c.DNSNames, ",")+"\n")...)
+				}
+				if len(c.IPAddresses) > 0 {
+					toWrite = append(toWrite, []byte("san_ip="+JoinIP(c.IPAddresses, ",")+"\n")...)
+				}
+				if PKIString(c.Subject) != PKIString(c.Issuer) {
+					toWrite = append(toWrite, []byte(fmt.Sprintf("issuer=%s\n", PKIString(c.Issuer)))...)
+				}
+				toWrite = append(toWrite, []byte(fmt.Sprintf("created=%s\n", c.NotBefore))...)
+				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
 			}
+		case "pkcs1cert8ukey":
 			for _, key := range keys {
 				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
 				if err != nil {
 					FailF("Error encoding key: %v", err)
 				}
-				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "PRIVATE KEY"})...)
-			}
-		} else if pre := strings.HasPrefix(outFile, "cert:"); pre || strings.HasSuffix(outFile, ".cert") || strings.HasSuffix(outFile, ".crt") {
-			if pre {
-				outFile = outFile[5:]
+				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: keyKind(key)})...)
 			}
 			for _, c := range certs {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
@@ -458,30 +586,6 @@ func main() {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
 			}
-		} else if strings.HasPrefix(outFile, "both:") {
-			outFile = outFile[5:]
-			for _, key := range keys {
-				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
-				if err != nil {
-					FailF("Error encoding key: %v", err)
-				}
-				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "PRIVATE KEY"})...)
-			}
-			for _, c := range certs {
-				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
-				if PKIString(c.Subject) != PKIString(c.Issuer) {
-					toWrite = append(toWrite, []byte(fmt.Sprintf("issuer=%s\n", PKIString(c.Issuer)))...)
-				}
-				toWrite = append(toWrite, []byte(fmt.Sprintf("created=%s\n", c.NotBefore))...)
-				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
-				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
-			}
-		} else if strings.HasSuffix(outFile, ".p12") || strings.HasSuffix(outFile, ".pfx") {
-			toWrite = p12Dat
-		} else if strings.HasSuffix(outFile, ".jks") {
-			toWrite = jksDat
-		} else {
-			FailF("Unable to determine file type for %q.", outFile)
 		}
 		fh, err := os.Create(outFile)
 		if err != nil {
@@ -516,6 +620,17 @@ type Encoder struct {
 func FailF(s string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, s+"\n", args...)
 	os.Exit(1)
+}
+
+func keyKind(key crypto.PrivateKey) string {
+	switch key.(type) {
+	case *rsa.PrivateKey:
+		return "RSA PRIVATE KEY"
+	case *ecdsa.PrivateKey:
+		return "EC PRIVATE KEY"
+	case ed25519.PrivateKey:
+	}
+	return "PRIVATE KEY"
 }
 
 // Attempt to parse the given private key DER block. OpenSSL 0.9.8 generates

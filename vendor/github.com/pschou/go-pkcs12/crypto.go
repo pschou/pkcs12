@@ -58,9 +58,15 @@ var (
 	OidHmacWithSHA3_512     = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 2, 16})
 
 	// PBES2 Stream ciphers
-	OidAES128CBC = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 2})
-	OidAES192CBC = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 22})
-	OidAES256CBC = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 42})
+	OidEncryptionAlgorithmAES128CBC  = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 2})
+	OidEncryptionAlgorithmAES192CBC  = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 22})
+	OidEncryptionAlgorithmAES256CBC  = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 42})
+	OidEncryptionAlgorithmDESCBC     = asn1.ObjectIdentifier([]int{1, 3, 14, 3, 2, 7})
+	OidEncryptionAlgorithmDESEDE3CBC = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 3, 7})
+
+	OidAES128WrapPad = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 8})
+	OidAES192WrapPad = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 28})
+	OidAES256WrapPad = asn1.ObjectIdentifier([]int{2, 16, 840, 1, 101, 3, 4, 1, 48})
 )
 
 var PBE_Algorithms_Available = map[string]asn1.ObjectIdentifier{
@@ -74,9 +80,11 @@ var PBE_Algorithms_Available = map[string]asn1.ObjectIdentifier{
 }
 
 var PBES2_Ciphers_Available = map[string]asn1.ObjectIdentifier{
-	"AES128CBC": OidAES128CBC,
-	"AES192CBC": OidAES192CBC,
-	"AES256CBC": OidAES256CBC,
+	"AES128CBC":    OidEncryptionAlgorithmAES128CBC,
+	"AES192CBC":    OidEncryptionAlgorithmAES192CBC,
+	"AES256CBC":    OidEncryptionAlgorithmAES256CBC,
+	"DES-CBC":      OidEncryptionAlgorithmDESCBC,
+	"DES-EDE3-CBC": OidEncryptionAlgorithmDESEDE3CBC,
 }
 
 var PBES2_HMACs_Available = map[string]asn1.ObjectIdentifier{
@@ -291,8 +299,14 @@ func pbDecrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (blockM
 	return
 }
 
-func BagDecrypt(info Decryptable, password []byte) (decrypted []byte, salt []byte, HMACAlgorithm, EncryptionAlgorithm asn1.ObjectIdentifier, err error) {
-	return pbDecrypt(info, password)
+func BagDecrypt(info Decryptable, password []rune) (decrypted []byte, salt []byte, HMACAlgorithm, EncryptionAlgorithm asn1.ObjectIdentifier, err error) {
+	p, _ := bmpSliceZeroTerminated(password)
+	defer func() {
+		for i := range p {
+			p[i] = 0
+		}
+	}()
+	return pbDecrypt(info, p)
 }
 
 func pbDecrypt(info Decryptable, password []byte) (decrypted []byte, salt []byte, HMACAlgorithm, EncryptionAlgorithm asn1.ObjectIdentifier, err error) {
@@ -423,21 +437,33 @@ func pbes2CipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (block 
 	EncryptionAlgorithm = params.EncryptionScheme.Algorithm
 
 	switch {
-	case params.EncryptionScheme.Algorithm.Equal(OidAES128CBC):
+	case params.EncryptionScheme.Algorithm.Equal(OidEncryptionAlgorithmAES128CBC):
 		key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, 16, prf)
 		block, err = aes.NewCipher(key)
 		if err != nil {
 			return
 		}
-	case params.EncryptionScheme.Algorithm.Equal(OidAES192CBC):
+	case params.EncryptionScheme.Algorithm.Equal(OidEncryptionAlgorithmAES192CBC):
 		key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, 24, prf)
 		block, err = aes.NewCipher(key)
 		if err != nil {
 			return
 		}
-	case params.EncryptionScheme.Algorithm.Equal(OidAES256CBC):
+	case params.EncryptionScheme.Algorithm.Equal(OidEncryptionAlgorithmAES256CBC):
 		key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, 32, prf)
 		block, err = aes.NewCipher(key)
+		if err != nil {
+			return
+		}
+	case params.EncryptionScheme.Algorithm.Equal(OidEncryptionAlgorithmDESCBC):
+		key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, 8, prf)
+		block, err = des.NewCipher(key)
+		if err != nil {
+			return
+		}
+	case params.EncryptionScheme.Algorithm.Equal(OidEncryptionAlgorithmDESEDE3CBC):
+		key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, 24, prf)
+		block, err = des.NewTripleDESCipher(key)
 		if err != nil {
 			return
 		}
@@ -473,8 +499,14 @@ func pbEncrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher
 	return cipher.NewCBCEncrypter(block, iv), block.BlockSize(), nil
 }
 
-func BagEncrypt(info Encryptable, decrypted, password []byte) (err error) {
-	return pbEncrypt(info, decrypted, password)
+func BagEncrypt(info Encryptable, decrypted []byte, password []rune) (err error) {
+	p, _ := bmpSliceZeroTerminated(password)
+	defer func() {
+		for i := range p {
+			p[i] = 0
+		}
+	}()
+	return pbEncrypt(info, decrypted, p)
 }
 
 func pbEncrypt(info Encryptable, decrypted []byte, password []byte) error {
@@ -500,10 +532,20 @@ type Encryptable interface {
 	SetData([]byte)
 }
 
-func makePBES2Parameters(rand io.Reader, hmacAlgorithm, encryptionAlgorithm asn1.ObjectIdentifier, salt []byte, iterations int) ([]byte, error) {
+func MakePBEParameters(salt []byte, iterations int) ([]byte, error) {
+	return asn1.Marshal(pbeParams{Salt: salt, Iterations: iterations})
+}
+func MakePBES2Parameters(rand io.Reader, hmacAlgorithm, encryptionAlgorithm asn1.ObjectIdentifier, salt []byte, iterations int) ([]byte, error) {
 	var err error
 
-	randomIV := make([]byte, 16)
+	var randomIV []byte
+	switch {
+	case encryptionAlgorithm.Equal(OidEncryptionAlgorithmDESEDE3CBC) ||
+		encryptionAlgorithm.Equal(OidEncryptionAlgorithmDESCBC):
+		randomIV = make([]byte, 8)
+	default:
+		randomIV = make([]byte, 16)
+	}
 	if _, err := rand.Read(randomIV); err != nil {
 		return nil, err
 	}
