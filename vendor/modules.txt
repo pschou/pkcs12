@@ -9,12 +9,10 @@ github.com/lwithers/minijks/jks
 github.com/pedroalbanese/gogost/gost34112012256
 github.com/pedroalbanese/gogost/gost34112012512
 github.com/pedroalbanese/gogost/internal/gost34112012
-# github.com/pschou/go-pkcs12 v0.0.0-20231201180228-4dde09c581c7
+# github.com/pschou/go-pkcs12 v0.0.0-20231207163201-1efe6650af4a
 ## explicit; go 1.15
 github.com/pschou/go-pkcs12
 github.com/pschou/go-pkcs12/internal/rc2
-# go.mozilla.org/pkcs7 v0.0.0-20210826202110-33d05740a352
-## explicit; go 1.11
 # golang.org/x/crypto v0.15.0
 ## explicit; go 1.18
 golang.org/x/crypto/blowfish

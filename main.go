@@ -491,7 +491,7 @@ func main() {
 		case "pkcs8key":
 			for _, key := range keys {
 
-				salt := make([]byte, 8)
+				salt := make([]byte, *saltLength)
 				if _, err = rand.Read(salt); err != nil {
 					FailF("Couldn't get random: %v", err)
 				}
