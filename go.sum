@@ -4,8 +4,6 @@ github.com/lwithers/minijks v1.1.0 h1:zfIkqzTLIUfGCkZSqEShDrWMueBoHZ4/46/+6KA3uY
 github.com/lwithers/minijks v1.1.0/go.mod h1:ypxkiQq/TirsT5/9wiF6lmNjYRabt2pm1XqKeaGnOj4=
 github.com/pedroalbanese/gogost v0.0.0-20230322180232-96c30f39056b h1:Peyo27T30fm/jO7fwp5hchgVsnrs5v7Z7r21AGr9P5g=
 github.com/pedroalbanese/gogost v0.0.0-20230322180232-96c30f39056b/go.mod h1:o2REj6TYwtP/PUg+hyX6norsH42EBT782LXVESgEjAU=
-github.com/pschou/go-pkcs12 v0.0.0-20231204145911-2b676d6ddacb h1:8Fj3LBvCzmijuEPXyxsoJaIg9nAx0y8VKAdKc4cxP9E=
-github.com/pschou/go-pkcs12 v0.0.0-20231204145911-2b676d6ddacb/go.mod h1:d4fmjH3qe/KozSJryBUVInJmJRI5TCAL3BAGrKVyGKc=
 github.com/pschou/go-pkcs12 v0.0.0-20231207163201-1efe6650af4a h1:EoZGhvitI/MRkf6iscabCXwoQk/T0EFmIkt/TQx3Z/I=
 github.com/pschou/go-pkcs12 v0.0.0-20231207163201-1efe6650af4a/go.mod h1:d4fmjH3qe/KozSJryBUVInJmJRI5TCAL3BAGrKVyGKc=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=

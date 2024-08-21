@@ -34,7 +34,7 @@ var (
 		"Read from file: \"file:passfile.txt\" environment: \"env:PASSWORD\" cmd flag: \"pass:pa55w0rd\"\n"+
 		"If omitted, the input password is used as the output password.")
 	certAlgorithm = flag.String("certAlgorithm", "PBES2", "Certificate Algorithm")
-	matchString   = flag.String("match", "cn=~.*", "Include only certificates matching an expression.\n"+
+	matchString   = flag.String("match", "", "Include only certificates matching an expression.\n"+
 		"Example: 'cn=my.domain' or for matching two 'cn=~test.*,o=\"my org\"'\n"+
 		"= equal, =~ regex match, != not equal, !~ regex doesn't match\n"+
 		"To match issuer use issuer_cn=\"my.ca\"")
@@ -44,6 +44,9 @@ var (
 	pbes2EncAlgorithm  = flag.String("pbes2-enc", "AES256CBC", "PBE2 Encryption Algorithm")
 	saltLength         = flag.Int("saltLength", 20, "Define the length of the salt")
 	iterations         = flag.Int("iterations", 10000, "Define the number of iterations")
+	ignoreExpired      = flag.Bool("ignore-expired", false, "Drop any expired certificates")
+	dedup              = flag.Bool("dedup", false, "Drop any duplicate certificates")
+	dropSHA1           = flag.Bool("drop-SHA1", false, "Drop any SHA1 signed certificates")
 	version            string
 
 	matchers []*matcher
@@ -60,8 +63,8 @@ func main() {
 			"Flags:\n")
 		flag.PrintDefaults()
 		fmt.Fprint(os.Stderr, "Output formats can be set by a prefix (ie crt:myfile) or suffix (myfile.crt).\n",
-			"Available prefixes:\n  pkcs8key key pkcs8ukey ukey pkcs1ukey pkcs1key pkcs1cert cert pkcs1cert8ukey both pkcs1cert8key pkcs12 jks\n",
-			"Available Suffixes:\n  cert crt p12 pfx key ukey\n",
+			"Available prefixes:\n  pkcs8key key pkcs8ukey ukey pkcs1ukey pkcs1key pkcs7cert cert pkcs7cert8ukey both pkcs7cert8key pkcs12 jks\n",
+			"Available Suffixes:\n  cert cer crt p12 pfx key ukey jks\n",
 		)
 		fmt.Fprint(os.Stderr, "PBE Algorithms Available:\n  ", stringsJoin(mapToSlice(pkcs12.PBE_Algorithms_Available), ", ", "  ", 100), "\n")
 		fmt.Fprint(os.Stderr, "PBE MACs Available:\n  ", stringsJoin(mapToSlice(pkcs12.PBE_MACs_Available), ", ", "  ", 100), "\n")
@@ -210,8 +213,10 @@ func main() {
 			dat = append(append(dat0, '\n'), dat1...)
 		}
 	}
-	if err != nil || len(dat) < 100 {
+	if err != nil {
 		FailF("Error reading file: %v", err)
+	} else if len(dat) < 100 {
+		FailF("Too small of file")
 	}
 
 	var keys []interface{}
@@ -334,6 +339,76 @@ func main() {
 		}*/
 	}
 
+	/*
+	 * Try reading BER/DER file
+	 */
+	for test := dat; ; {
+		var elm asn1.RawContent
+		next, err := asn1.Unmarshal(test, &elm)
+		if err != nil {
+			break
+		}
+		if x509Cert, err := x509.ParseCertificate(elm); err == nil {
+			certs = append(certs, x509Cert)
+		} else if pkey, err := parsePrivateKey(elm); err == nil {
+			keys = append(keys, pkey)
+		} else {
+			var info encryptedContentInfo
+			trailing, err := asn1.Unmarshal(test, &info)
+			if err != nil {
+				break
+			}
+			if len(trailing) != 0 {
+				break
+			}
+			pkey, _, _, _, err = pkcs12.BagDecrypt(info, []rune(*passwordIn))
+			if err != nil {
+				break
+			}
+			keys = append(keys, pkey)
+			test = trailing
+			continue
+		}
+		test = next
+	}
+
+	if *dropSHA1 {
+		var new_certs []*x509.Certificate
+		for _, x509Cert := range certs {
+			if x509Cert.SignatureAlgorithm == x509.SHA1WithRSA {
+				continue
+			}
+			new_certs = append(new_certs, x509Cert)
+		}
+		certs = new_certs
+	}
+
+	if *ignoreExpired {
+		var new_certs []*x509.Certificate
+		for _, x509Cert := range certs {
+			if time.Now().After(x509Cert.NotAfter) {
+				continue
+			}
+			if time.Now().Before(x509Cert.NotBefore) {
+				continue
+			}
+			new_certs = append(new_certs, x509Cert)
+		}
+		certs = new_certs
+	}
+
+	if *dedup {
+		dedupMap := make(map[string]struct{})
+		var new_certs []*x509.Certificate
+		for _, x509Cert := range certs {
+			if _, ok := dedupMap[string(x509Cert.Raw)]; !ok {
+				dedupMap[string(x509Cert.Raw)] = struct{}{}
+				new_certs = append(new_certs, x509Cert)
+			}
+		}
+		certs = new_certs
+	}
+
 	var p12Dat, jksDat []byte
 
 	if len(certs) == 0 {
@@ -342,49 +417,64 @@ func main() {
 		// If a key was provided, loop over the keys and build the certificate chains
 		if len(keys) > 0 {
 			ks = &jks.Keystore{}
-			var new_certs []*x509.Certificate
 			var dedup_certs = make(map[*x509.Certificate]struct{})
 
 		key_loop:
 			for _, key := range keys {
 				keypair := &jks.Keypair{PrivateKey: key}
-				keyentry := pkcs12.KeyEntry{Key: key}
-				certentry := pkcs12.CertEntry{}
 				for _, c := range certs {
 					if findCert(c, key) == nil {
 						//fmt.Println("common name", c.Subject.CommonName, include.MatchString(c.Subject.CommonName), (exclude != nil && exclude.MatchString(c.Subject.CommonName)))
-						if !matchNames(matchers, c.Subject, c.Issuer) {
+						if len(matchers) > 0 && !matchNames(matchers, c.Subject, c.Issuer) {
 							continue key_loop
+						}
+						cn := c.Subject.CommonName
+						if cn == "" {
+							cn = PKIString(c.Subject)
 						}
 						keypair.CertChain = []*jks.KeypairCert{&jks.KeypairCert{
 							Cert: c,
 							Raw:  c.Raw,
 						}}
-						keypair.Alias = c.Subject.CommonName
+						keypair.Alias = cn
 						keypair.Timestamp = time.Now()
-						keyentry.FriendlyName = c.Subject.CommonName
-						certentry.Cert = c
-						certentry.FriendlyName = c.Subject.CommonName
+
+						keyentry := pkcs12.KeyEntry{
+							Key:          key,
+							FriendlyName: cn,
+						}
+
+						// Update the entries
+						encoder.KeyEntries = append(encoder.KeyEntries, keyentry)
+						encoder.CertEntries = append(encoder.CertEntries, pkcs12.CertEntry{
+							Cert:         c,
+							FriendlyName: cn,
+						})
+						ks.Keypairs = append(ks.Keypairs, keypair)
+
 						// add the cert only if needed
 						if _, ok := dedup_certs[c]; !ok {
-							new_certs = append(new_certs, c)
+							encoder.CertEntries = append(encoder.CertEntries, pkcs12.CertEntry{
+								Cert:         c,
+								FriendlyName: cn,
+							})
 							dedup_certs[c] = struct{}{}
 						}
 						for i := findNext(c, certs); i != nil; i = findNext(i, certs) {
 							keypair.CertChain = append(keypair.CertChain, &jks.KeypairCert{Raw: i.Raw, Cert: i})
 							// add the cert only if needed
 							if _, ok := dedup_certs[i]; !ok {
-								new_certs = append(new_certs, i)
+								encoder.CertEntries = append(encoder.CertEntries, pkcs12.CertEntry{
+									Cert:         c,
+									FriendlyName: cn,
+								})
 								dedup_certs[i] = struct{}{}
 							}
 						}
+
 						break
 					}
 				}
-				certs = new_certs
-				encoder.KeyEntries = append(encoder.KeyEntries, keyentry)
-				encoder.CertEntries = append(encoder.CertEntries, certentry)
-				ks.Keypairs = append(ks.Keypairs, keypair)
 			}
 			encoder.GenerateSalts(*saltLength)
 
@@ -412,12 +502,16 @@ func main() {
 			ts.GenerateSalts(*saltLength)
 			var new_certs []*x509.Certificate
 			for _, c := range certs {
-				if !matchNames(matchers, c.Subject, c.Issuer) {
+				if len(matchers) > 0 && !matchNames(matchers, c.Subject, c.Issuer) {
 					continue
 				}
 				new_certs = append(new_certs, c)
+				cn := c.Subject.CommonName
+				if cn == "" {
+					cn = PKIString(c.Subject)
+				}
 				ts.Entries = append(ts.Entries, pkcs12.TrustStoreEntry{
-					FriendlyName: c.Subject.CommonName,
+					FriendlyName: cn,
 					Cert:         c,
 				})
 			}
@@ -446,11 +540,11 @@ func main() {
 				outType, outFile = parts[0], parts[1]
 			case "pkcs1key":
 				outType, outFile = parts[0], parts[1]
-			case "pkcs1cert", "cert":
-				outType, outFile = "pkcs1cert", parts[1]
-			case "pkcs1cert8ukey", "both":
-				outType, outFile = "pkcs1cert8ukey", parts[1]
-			case "pkcs1cert8key":
+			case "pkcs7cert", "cert":
+				outType, outFile = "pkcs7cert", parts[1]
+			case "pkcs7cert8ukey", "both":
+				outType, outFile = "pkcs7cert8ukey", parts[1]
+			case "pkcs7cert8key":
 				outType, outFile = parts[0], parts[1]
 			case "pkcs12":
 				outType, outFile = parts[0], parts[1]
@@ -460,10 +554,12 @@ func main() {
 		}
 		if outType == "" {
 			switch {
-			case strings.HasSuffix(outFile, ".cert") || strings.HasSuffix(outFile, ".crt"):
-				outType = "pkcs1cert"
+			case strings.HasSuffix(outFile, ".cert") || strings.HasSuffix(outFile, ".crt") || strings.HasSuffix(outFile, ".cer"):
+				outType = "pkcs7cert"
 			case strings.HasSuffix(outFile, ".p12") || strings.HasSuffix(outFile, ".pfx"):
 				outType = "pkcs12"
+			case strings.HasSuffix(outFile, ".jks"):
+				outType = "jks"
 			case strings.HasSuffix(outFile, ".key"):
 				outType = "pkcs8key"
 			case strings.HasSuffix(outFile, ".ukey"):
@@ -517,7 +613,7 @@ func main() {
 					toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: privateDER, Type: "RSA PRIVATE KEY"})...)
 				}
 			}
-		case "pkcs1cert":
+		case "pkcs7cert", "pkcs1cert":
 			for _, c := range certs {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
 				if len(c.DNSNames) > 0 {
@@ -533,7 +629,7 @@ func main() {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("expires=%s\n", c.NotAfter))...)
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: c.Raw, Type: "CERTIFICATE"})...)
 			}
-		case "pkcs1cert8key":
+		case "pkcs7cert8key", "pkcs1cert8key":
 			for _, c := range certs {
 				toWrite = append(toWrite, []byte(fmt.Sprintf("subject=%s\n", PKIString(c.Subject)))...)
 				if len(c.DNSNames) > 0 {
@@ -561,7 +657,7 @@ func main() {
 				}
 				toWrite = append(toWrite, pem.EncodeToMemory(&pem.Block{Bytes: encryptedDER, Type: "ENCRYPTED PRIVATE KEY"})...)
 			}
-		case "pkcs1cert8ukey":
+		case "pkcs7cert8ukey", "pkcs1cert8ukey":
 			for _, key := range keys {
 				privateDER, err := x509.MarshalPKCS8PrivateKey(key)
 				if err != nil {

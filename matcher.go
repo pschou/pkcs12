@@ -15,7 +15,7 @@ type matcher struct {
 func newMatcher(str string) *matcher {
 	//if str[len(str)-1] == '"' {
 	//	str = str[:len(str)]
-	for i := 0; ; i++ {
+	for i := 0; i < len(str); i++ {
 		switch {
 		case i < len(str)-1 && str[i:i+2] == "=~":
 			if r, err := regexp.Compile(unquote(str[i+2:])); err == nil {
@@ -56,24 +56,16 @@ func unquote(str string) string {
 func matchNames(tests []*matcher, subject, issuer pkix.Name) (ret bool) {
 	// loop over the certificate fields
 	for i := range subject.Names {
+		ret = true
 		parts := strings.SplitN(pkix.RDNSequence([]pkix.RelativeDistinguishedNameSET{subject.Names[i : i+1]}).String(), "=", 2)
 		//fmt.Println("filter match called for", parts)
 		for _, t := range tests {
 			//fmt.Printf("test: %#v\n", t)
 			if strings.EqualFold(parts[0], t.field) {
-				if t.reg == nil {
-					if t.str == parts[1] && !t.negate {
-						ret = true
-					} else {
-						return false
-					}
-				} else {
-					// regex match
-					if t.reg.MatchString(parts[1]) && !t.negate {
-						ret = true
-					} else {
-						return false
-					}
+				if t.reg == nil { // Direct match
+					ret = ret && ((t.str == parts[1]) == !t.negate)
+				} else { // Regexp match
+					ret = ret && (t.reg.MatchString(parts[1]) == !t.negate)
 				}
 			}
 		}
@@ -85,19 +77,10 @@ func matchNames(tests []*matcher, subject, issuer pkix.Name) (ret bool) {
 		parts[0] = "issuer_" + parts[0]
 		for _, t := range tests {
 			if strings.EqualFold(parts[0], t.field) {
-				if t.reg == nil {
-					if t.str == parts[1] && !t.negate {
-						ret = true
-					} else {
-						return false
-					}
-				} else {
-					// regex match
-					if t.reg.MatchString(parts[1]) && !t.negate {
-						ret = true
-					} else {
-						return false
-					}
+				if t.reg == nil { // Direct match
+					ret = ret && (t.str == parts[1] == !t.negate)
+				} else { // Regex match
+					ret = ret && (t.reg.MatchString(parts[1]) == !t.negate)
 				}
 			}
 		}
