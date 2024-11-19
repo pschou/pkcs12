@@ -45,7 +45,7 @@ var (
 	saltLength         = flag.Int("saltLength", 20, "Define the length of the salt")
 	iterations         = flag.Int("iterations", 10000, "Define the number of iterations")
 	ignoreExpired      = flag.Bool("ignore-expired", false, "Drop any expired certificates")
-	dedup              = flag.Bool("dedup", false, "Drop any duplicate certificates")
+	dedup              = flag.Bool("dedup", true, "Drop any duplicate certificates")
 	dropSHA1           = flag.Bool("drop-SHA1", false, "Drop any SHA1 signed certificates")
 	version            string
 
@@ -299,77 +299,92 @@ func main() {
 	}
 
 	if len(certs) == 0 && len(keys) == 0 {
-		P12 := &pkcs12.P12{Password: []rune(*passwordIn)}
 		// Try reading p12 file
+		P12 := &pkcs12.P12{Password: []rune(*passwordIn)}
+
+		// Make sure the file is in binary format, if the p12 is in base64, convert to binary first
 		if dec, err := base64.StdEncoding.DecodeString(string(dat)); err == nil {
 			dat = []byte(dec)
 		}
+
 		err = pkcs12.Unmarshal(dat, P12)
-		if err != nil {
-			FailF("Error reading P12 file %q: %v", files[0], err)
-		}
-
-		//fmt.Printf("p12: %#v\n", P12)
-
-		for _, k := range P12.KeyEntries {
-			keys = append(keys, k.Key)
-		}
-		for _, c := range P12.CertEntries {
-			certs = append(certs, c.Cert)
-		}
-		/*	var ksChain []keystore.Certificate
+		if err == nil {
+			for _, k := range P12.KeyEntries {
+				keys = append(keys, k.Key)
+			}
 			for _, c := range P12.CertEntries {
-				if findCert(c, k.Key) == nil {
-					ksChain = append(ksChain, keystore.Certificate{
-						Type:    "X.509",
-						Content: c.Cert.Raw,
-					})
+				certs = append(certs, c.Cert)
+			}
+			/*	var ksChain []keystore.Certificate
+				for _, c := range P12.CertEntries {
+					if findCert(c, k.Key) == nil {
+						ksChain = append(ksChain, keystore.Certificate{
+							Type:    "X.509",
+							Content: c.Cert.Raw,
+						})
+					}
 				}
-			}
 
-			privateDER, err := x509.MarshalPKCS8PrivateKey(k.Key)
-			if err != nil {
-				FailF("Error marshalling private key: %v", err)
-			}
-			ks.SetPrivateKeyEntry(fmt.Sprintf("%d", i+1), keystore.PrivateKeyEntry{
-				CreationTime:     time.Now(),
-				PrivateKey:       privateDER,
-				CertificateChain: ksChain,
-			}, []byte(password))
-		}*/
+				privateDER, err := x509.MarshalPKCS8PrivateKey(k.Key)
+				if err != nil {
+					FailF("Error marshalling private key: %v", err)
+				}
+				ks.SetPrivateKeyEntry(fmt.Sprintf("%d", i+1), keystore.PrivateKeyEntry{
+					CreationTime:     time.Now(),
+					PrivateKey:       privateDER,
+					CertificateChain: ksChain,
+				}, []byte(password))
+			}*/
+		}
 	}
 
 	/*
 	 * Try reading BER/DER file
 	 */
-	for test := dat; ; {
-		var elm asn1.RawContent
-		next, err := asn1.Unmarshal(test, &elm)
-		if err != nil {
-			break
+	if len(certs) == 0 && len(keys) == 0 {
+		// Attempt to read one from the file, TODO: Test reading in more than one
+		for test := dat; false; {
+			var elm asn1.RawContent
+			next, err := asn1.Unmarshal(test, &elm)
+			if err != nil || len(next) == 0 {
+				break
+			}
+			if x509Cert, err := x509.ParseCertificate(elm); err == nil {
+				certs = append(certs, x509Cert)
+				test = next
+			} else if pkey, err := parsePrivateKey(elm); err == nil {
+				keys = append(keys, pkey)
+				test = next
+			} else {
+				var info encryptedContentInfo
+				trailing, err := asn1.Unmarshal(test, &info)
+				if err != nil {
+					break
+				}
+				if len(trailing) != 0 {
+					break
+				}
+				pkey, _, _, _, err = pkcs12.BagDecrypt(info, []rune(*passwordIn))
+				if err != nil {
+					break
+				}
+				keys = append(keys, pkey)
+				test = trailing
+				continue
+			}
 		}
-		if x509Cert, err := x509.ParseCertificate(elm); err == nil {
-			certs = append(certs, x509Cert)
-		} else if pkey, err := parsePrivateKey(elm); err == nil {
-			keys = append(keys, pkey)
-		} else {
-			var info encryptedContentInfo
-			trailing, err := asn1.Unmarshal(test, &info)
-			if err != nil {
-				break
+	}
+
+	if *dedup {
+		dedupMap := make(map[string]struct{})
+		var new_certs []*x509.Certificate
+		for _, x509Cert := range certs {
+			if _, ok := dedupMap[string(x509Cert.Raw)]; !ok {
+				dedupMap[string(x509Cert.Raw)] = struct{}{}
+				new_certs = append(new_certs, x509Cert)
 			}
-			if len(trailing) != 0 {
-				break
-			}
-			pkey, _, _, _, err = pkcs12.BagDecrypt(info, []rune(*passwordIn))
-			if err != nil {
-				break
-			}
-			keys = append(keys, pkey)
-			test = trailing
-			continue
 		}
-		test = next
+		certs = new_certs
 	}
 
 	if *dropSHA1 {
@@ -393,18 +408,6 @@ func main() {
 				continue
 			}
 			new_certs = append(new_certs, x509Cert)
-		}
-		certs = new_certs
-	}
-
-	if *dedup {
-		dedupMap := make(map[string]struct{})
-		var new_certs []*x509.Certificate
-		for _, x509Cert := range certs {
-			if _, ok := dedupMap[string(x509Cert.Raw)]; !ok {
-				dedupMap[string(x509Cert.Raw)] = struct{}{}
-				new_certs = append(new_certs, x509Cert)
-			}
 		}
 		certs = new_certs
 	}
